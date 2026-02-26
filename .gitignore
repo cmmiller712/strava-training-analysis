@@ -8,6 +8,10 @@ Raw Data/
 Raw Data/**
 *.zip
 
+# Processed data (do not commit)
+data/processed/
+data/processed/**
+
 # Python / Jupyter
 venv/
 __pycache__/

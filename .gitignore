@@ -13,10 +13,13 @@ data/processed/
 data/processed/**
 
 # Python / Jupyter
+.venv/
 venv/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.jupyter_config/
+.ipython_dir/
 
 # Secrets
 .env

@@ -1,68 +1,152 @@
-# Strava Training Analysis
+# Strava Training Intelligence
 
-Reproducible analysis of Strava training data: volume trends, consistency, and performance indicators (focused on sub-3 marathon).
+> **Strava tells you what you did. This tells you if it's working.**
 
-**Why this project** — I'm a two-time Ironman and 100k ultramarathon finisher, currently training for a sub-3 marathon. I work in data engineering and am obsessed with my Strava stats. I built this to turn my export into something useful: a clean pipeline from raw activities + FIT files to training metrics, and notebooks that answer both serious questions (am I on track for sub-3? how's my ramp rate?) and fun ones (what's my rarest activity type? do harder workouts get more kudos?). Everything is reproducible, privacy-conscious (no GPS or personal data in outputs), and designed so the insights are viewable without running a single cell.
+A training intelligence system for serious endurance athletes.
+Built on raw Strava export data — no API, no third-party subscriptions,
+no black-box scores. Just your data, analyzed the way a coach would.
 
-## View the insights (no setup required)
+![Training Intelligence Card](outputs/training_card.png)
 
-Rendered reports with all charts and tables—open in any browser:
+---
 
-| Report | What it shows |
-|--------|----------------|
-| **[Sub-3 performance modeling](reports/01_sub3_performance_modeling.html)** | Training volume, pace zones, consistency, marathon-pace miles from FIT streams. |
-| **[Lifetime athlete intelligence](reports/02_lifetime_athlete_intelligence.html)** | Activity mix, most/rarest types, kudos by type, run volume over time. |
+## The Problem
 
-To regenerate reports after re-running the pipeline: `./scripts/export_reports.sh`
+Strava is great at recording training. It is not good at interpreting it.
+It will show you your pace, your heart rate, your weekly mileage. It will
+not tell you whether your aerobic efficiency is improving, whether your
+long run progression is on track, or whether your training load is building
+faster than your body can absorb. For athletes training toward a specific
+goal — a sub-3 marathon, a Boston qualifier, an Ironman — that
+interpretation gap is where training plans succeed or fail.
 
-## Privacy
+I am a data engineer, two-time Ironman finisher, and 100k ultramarathon
+runner currently targeting a sub-3 marathon. I built this system because
+I wanted answers Strava could not give me. The result is a pipeline that
+goes from raw .fit files and activities.csv to a full coaching intelligence
+layer — phase detection, readiness scoring, aerobic efficiency trending,
+intensity distribution analysis, and a weekly prescription — all
+explainable, all configurable, all reproducible.
 
-Raw Strava export data is not committed. GPS-related fields (coordinates, routes) are excluded from any published datasets.
+---
 
-## Project layout
+## What It Produces
 
-| Path | Description |
-|------|-------------|
-| `data/raw/` | Private Strava export (git-ignored). Place unzipped export in `data/raw/strava_export/`. |
-| `data/processed/` | Sanitized outputs (git-ignored): runs, weekly model, lifetime activities, summaries. |
-| `reports/` | Rendered HTML of the notebooks (charts + tables); safe to share, no data. |
-| `src/` | Data loading, feature engineering, and dataset build. |
-| `notebooks/` | Analysis and charts (Jupyter). |
-| `scripts/` | Helpers (e.g. export notebooks to `reports/`). |
+#### Training Intelligence Dashboard
 
-**Pipeline:**
+An interactive Streamlit dashboard with seven analytical sections:
+weekly mileage by training phase, readiness score trajectory, aerobic
+efficiency trend, readiness component breakdown, intensity distribution
+analysis, next-week training prescription, and a coaching insights panel.
+Every metric produces a plain-English recommendation — not a number, an action.
+```bash
+streamlit run app.py
+```
 
-- **`src/build_datasets.py`** — Main pipeline. Reads Strava export + FIT files, builds run-level and weekly metrics (pace, MP miles from stream, AES, ramp rate, long run, etc.), writes `runs_enriched.csv` and `weekly_model.csv`. Used by the sub-3 notebook.
-- **`src/build_lifetime_dataset.py`** — Lifetime pipeline. Builds `lifetime_activities.csv` from all activities ever (no date filter). Used by the lifetime “fun” notebook (activity mix, kudos, etc.).
-- **`src/clean_data.py`** — Optional. Uses the same loader (`io_strava`) to produce `weekly_summary.csv` and `monthly_summary.csv` (all activities, no run filter).
+#### Marathon Readiness Score (0–100)
 
-Config (build start date, goal marathon pace, ramp threshold) lives in **`src/config.py`**.
+A weighted composite of five signals — weekly volume, long run progression,
+training consistency, aerobic efficiency trend, and ramp rate safety. Each
+component is scored independently and combined with documented weights. The
+model is fully explainable: you can see exactly why your score is 70, not
+just that it is.
 
-## How to run
+#### Projected Finish Time
 
-1. Place your Strava export in `data/raw/strava_export/` (include `activities.csv` and, for MP stream miles, the FIT files in the export).
-2. **Build main datasets (required for notebooks):**
-   ```bash
-   python src/build_datasets.py
-   ```
-   Outputs: `data/processed/runs_enriched.csv`, `data/processed/weekly_model.csv`.
-3. **Build lifetime dataset (for notebook 02):**
-   ```bash
-   python src/build_lifetime_dataset.py
-   ```
-   Outputs: `data/processed/lifetime_activities.csv`.
-4. **Optional** — Weekly/monthly activity summaries (all sports):
-   ```bash
-   python src/clean_data.py
-   ```
-5. Open notebooks from `notebooks/` (paths assume you run from repo root or from `notebooks/`). Notebook `02_lifetime_athlete_intelligence.ipynb` uses `lifetime_activities.csv`.
-6. **Optional** — Export notebooks to HTML for sharing (no code run required): `./scripts/export_reports.sh` → outputs in `reports/`.
+Uses a Riegel-formula base adjusted by recent pace data and an AES fitness
+modifier. Returns a predicted time with a confidence interval that widens
+under fatigue or sparse data and narrows with consistent training. At 8
+weeks into a build the model returned 3:48 ± 3 min against a sub-3 goal —
+honest before it is flattering.
 
-## Requirements
+#### Training Intelligence Card
 
-- **Minimal (pipeline only):** `pandas`, `numpy`, `fitparse`
-- **With notebooks:** install from `requirements.txt` (adds matplotlib, Jupyter, etc.)
+A single exportable PNG — 1080×1080, Instagram-native — summarizing the
+full training picture: readiness score, projected finish, current phase,
+weekly sparkline, component breakdown, and the week's highest-priority
+coaching insight.
+```bash
+python generate_card.py --name "Your Name" --goal "Sub-3 Marathon" --goal-minutes 180
+```
 
+---
+
+## How The Model Works
+
+**Phase Detection**
+
+Training phase is classified per week using five configurable thresholds:
+base mileage ceiling, build mileage floor, peak long run distance, peak
+marathon-pace specificity, and taper volume reduction factor. All thresholds
+live in `src/config.py` and are overridable at runtime via the Streamlit
+sidebar — a 4:30 marathoner and a sub-3 marathoner have fundamentally
+different definitions of "peak." The classifier also maintains a calendar
+scaffold across all weeks including rest weeks, so a mid-build cutback
+week is correctly labeled Rest rather than mislabeled Taper.
+
+**Readiness Model**
+
+The readiness score is a weighted composite:
+Volume (25%) + Long Run (25%) + Consistency (20%) +
+AES Trend (15%) + Ramp Safety (15%) = Readiness Score
+
+Each component scores 0–100 independently before weighting. Ramp rate
+uses a miles-only fallback when heart rate data is absent, so the model
+degrades gracefully rather than silently producing NaN. AES trend is
+computed from a 30-calendar-day rolling window rather than 30 runs, which
+normalizes for training density — a 30-run window covers 3 weeks during
+heavy training and 3 months during recovery.
+
+---
+
+## Key Technical Decisions
+
+| Decision | Why |
+|---|---|
+| FIT stream parsing for MP miles | Whole-activity average pace misclassifies easy runs with fast finishes. Second-by-second stream detection with `require_contiguous_miles` is significantly more accurate. |
+| 30-calendar-day AES window | A 30-run rolling window is not time-consistent. Calendar days normalize across varying training density. |
+| HR fallback for ramp rate | `load = miles × avg_hr` silently collapses to NaN when HR is missing, breaking the ramp signal. Volume-only fallback keeps the metric live. |
+| `cfg` as `SimpleNamespace` | The same phase and readiness functions serve both the headless pipeline (config module) and the Streamlit dashboard (SimpleNamespace built from slider values) without branching logic. |
+| Calendar scaffold for rest weeks | `groupby("week_start")` drops weeks with no runs. Without a scaffold, rest weeks disappear from consistency scoring and taper detection fires incorrectly. |
+
+---
+
+## Running It
+```bash
+# 1. Place your Strava export in data/raw/strava_export/
+#    (activities.csv + activities/*.fit files)
+
+# 2. Build the datasets
+python src/build_datasets.py
+
+# 3. Launch the dashboard
+streamlit run app.py
+
+# 4. Generate the shareable card
+python generate_card.py
+```
+
+All thresholds — goal pace, mileage targets, phase boundaries — are
+configured in `src/config.py` and overridable at runtime via the
+dashboard sidebar.
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## About
+
+Built by Christian Miller — data engineer, 2× Ironman, 100k ultramarathon
+finisher, and sub-3 marathon candidate. This project exists because I
+wanted coaching intelligence from my own data, and because I think Strava
+could build something like this natively.
+
+→ [LinkedIn](https://www.linkedin.com/in/christian-miller-27957914a/) · [Strava](https://www.strava.com/athletes/122046015)
+
+---
+
+## Privacy
+
+Raw Strava export data is not committed. GPS coordinates, route data, and
+personally identifiable fields are excluded from all published outputs.

@@ -1,0 +1,297 @@
+"""
+Marathon readiness scoring model.
+
+Produces a 0–100 composite score from five components, each independently
+scored 0–100 then weighted. Weights reflect a sub-3 marathon build priority:
+volume and long run are equally critical; consistency is the next lever;
+AES trend and ramp risk are supporting signals.
+
+Component weights:
+  volume_score      25%  — Are you hitting target weekly mileage?
+  long_run_score    25%  — Is the long run approaching race-specific distance?
+  consistency_score 20%  — Have you been running regularly for the past 8 weeks?
+  aes_trend_score   15%  — Is aerobic efficiency trending in the right direction?
+  ramp_score        15%  — Is training load increasing at a safe rate?
+
+All thresholds are sourced from config.py.
+"""
+import numpy as np
+import pandas as pd
+
+from config import TARGET_WEEKLY_MILES, PEAK_LONG_RUN_MI, RAMP_THRESHOLD
+
+
+def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Clamp a value to [lo, hi]."""
+    return max(lo, min(hi, float(value)))
+
+
+def compute_readiness(weekly: pd.DataFrame, cfg=None) -> pd.DataFrame:
+    """
+    Compute per-week readiness scores and attach them to the weekly DataFrame.
+
+    Added columns:
+      volume_score      — 0–100, miles vs. target
+      long_run_score    — 0–100, longest run vs. peak target
+      consistency_score — 0–100, fraction of last 8 weeks with ≥1 run
+      aes_trend_score   — 0, 50, or 100 based on AES slope over last 4 weeks
+      ramp_score        — 0–100, penalty for exceeding RAMP_THRESHOLD
+      readiness_score   — weighted composite (0–100, 1 decimal)
+      readiness_label   — plain-English label
+
+    Args:
+        weekly: DataFrame output from build_datasets.py with at minimum:
+                miles, long_run_miles, runs, aes_mean, ramp_rate columns.
+        cfg:    Optional config object with TARGET_WEEKLY_MILES, PEAK_LONG_RUN_MI,
+                RAMP_THRESHOLD attributes. Defaults to config.py values when None.
+                Pass a types.SimpleNamespace from Streamlit sliders to override
+                thresholds at runtime without touching config.py.
+
+    Returns:
+        Same DataFrame with readiness columns appended.
+    """
+    # Resolve thresholds: caller-supplied cfg overrides module-level defaults.
+    target_miles = getattr(cfg, "TARGET_WEEKLY_MILES", TARGET_WEEKLY_MILES)
+    peak_long_run = getattr(cfg, "PEAK_LONG_RUN_MI", PEAK_LONG_RUN_MI)
+    ramp_thresh = getattr(cfg, "RAMP_THRESHOLD", RAMP_THRESHOLD)
+
+    weekly = weekly.sort_values("week_start").copy()
+
+    # ------------------------------------------------------------------
+    # Volume score (25%)
+    # Fraction of TARGET_WEEKLY_MILES achieved, capped at 100.
+    # A 60 mpw week = 100; a 30 mpw week = 50.
+    # ------------------------------------------------------------------
+    weekly["volume_score"] = weekly["miles"].apply(
+        lambda m: _clamp((m or 0) / target_miles) * 100
+        if pd.notna(m) else 0.0
+    )
+
+    # ------------------------------------------------------------------
+    # Long run score (25%)
+    # Fraction of PEAK_LONG_RUN_THRESHOLD achieved, capped at 100.
+    # An 18-mile long run = 100; a 12-miler = 67.
+    # ------------------------------------------------------------------
+    weekly["long_run_score"] = weekly["long_run_miles"].apply(
+        lambda lr: _clamp((lr or 0) / peak_long_run) * 100
+        if pd.notna(lr) else 0.0
+    )
+
+    # ------------------------------------------------------------------
+    # Consistency score (20%)
+    # Count of weeks in the trailing 8-week window (inclusive) where the
+    # athlete logged at least one run, divided by 8.
+    # Uses min_periods=1 so early weeks aren't penalized for lacking history.
+    # ------------------------------------------------------------------
+    has_run = (weekly["runs"].fillna(0) >= 1).astype(int)
+    weekly["consistency_score"] = (
+        has_run.rolling(8, min_periods=1).sum() / 8.0 * 100
+    )
+
+    # ------------------------------------------------------------------
+    # AES trend score (15%)
+    # AES = pace_sec_mi / avg_hr — lower means more efficient (faster at same HR).
+    # We look at the slope of aes_mean over the last 4 available weekly values:
+    #   Improving (slope < 0, ≥1% change): 100  — engine getting cleaner
+    #   Flat      (|slope| < 1% change):    50  — holding steady
+    #   Declining (slope > 0, ≥1% change):   0  — efficiency dropping
+    # Weeks with fewer than 2 valid data points default to 50 (neutral).
+    # ------------------------------------------------------------------
+    aes_vals = weekly["aes_mean"].values
+    aes_scores = []
+    for i in range(len(aes_vals)):
+        window = aes_vals[max(0, i - 3): i + 1]
+        valid = window[~np.isnan(window.astype(float))]
+        if len(valid) < 2:
+            aes_scores.append(50.0)
+            continue
+        slope = np.polyfit(range(len(valid)), valid, 1)[0]
+        pct_change = abs(slope) / valid[0] if valid[0] != 0 else 0.0
+        if slope < 0 and pct_change >= 0.01:   # improving efficiency
+            aes_scores.append(100.0)
+        elif pct_change < 0.01:                # effectively flat
+            aes_scores.append(50.0)
+        else:                                  # declining efficiency
+            aes_scores.append(0.0)
+    weekly["aes_trend_score"] = aes_scores
+
+    # ------------------------------------------------------------------
+    # Ramp score (15%)
+    # Penalizes weeks where load increased faster than RAMP_THRESHOLD.
+    # Formula: 1 - (ramp_rate / RAMP_THRESHOLD), clamped to [0, 1].
+    # At ramp_rate = 0%:  score = 100 (no increase)
+    # At ramp_rate = 15%: score = 0   (hit the threshold exactly)
+    # At ramp_rate > 15%: score = 0   (over threshold, clamped)
+    # NaN ramp (first week or missing data) receives 100 — no penalty for
+    # unknown, since we can't flag a risk we can't measure.
+    # ------------------------------------------------------------------
+    weekly["ramp_score"] = weekly["ramp_rate"].apply(
+        lambda r: _clamp(1.0 - (r / ramp_thresh)) * 100
+        if pd.notna(r) else 100.0
+    )
+
+    # ------------------------------------------------------------------
+    # Composite readiness score
+    # ------------------------------------------------------------------
+    weekly["readiness_score"] = (
+        0.25 * weekly["volume_score"]
+        + 0.25 * weekly["long_run_score"]
+        + 0.20 * weekly["consistency_score"]
+        + 0.15 * weekly["aes_trend_score"]
+        + 0.15 * weekly["ramp_score"]
+    ).round(1)
+
+    # ------------------------------------------------------------------
+    # Readiness label
+    # ------------------------------------------------------------------
+    def _label(score: float) -> str:
+        if score <= 40:
+            return "Not Ready"
+        elif score <= 65:
+            return "Building"
+        elif score <= 80:
+            return "On Track"
+        else:
+            return "Race Ready"
+
+    weekly["readiness_label"] = weekly["readiness_score"].apply(_label)
+
+    return weekly
+
+
+# ---------------------------------------------------------------------------
+# Projected finish time
+# ---------------------------------------------------------------------------
+
+def _fmt_hms(minutes: float) -> str:
+    """Format decimal minutes as H:MM:SS."""
+    total_sec = int(round(minutes * 60))
+    h = total_sec // 3600
+    m = (total_sec % 3600) // 60
+    s = total_sec % 60
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+def compute_projected_time(
+    runs_df: pd.DataFrame,
+    weekly_df: pd.DataFrame = None,
+    cfg=None,
+) -> dict:
+    """
+    Estimate marathon finish time using Riegel's endurance formula with
+    an AES-based efficiency adjustment.
+
+    Steps:
+      1. Pull the 5 most recent runs ≥ 8 miles (race-predictive distance).
+      2. Weighted-average pace, weighted by distance (longer runs count more).
+      3. Apply Riegel's formula: T2 = weighted_pace × 26.2188 × (26.2188 / D1)^0.06
+         This is equivalent to the standard T2 = T1 × (D2/D1)^1.06.
+      4. AES adjustment: if aerobic efficiency is improving (aes_mean slope < 0
+         over the last 4 weeks), apply a 2% speed bonus; if declining, 2% penalty.
+         NOTE: AES = pace/HR so a *falling* AES value = *improving* efficiency.
+      5. Confidence interval based on data quality flags.
+
+    Returns a dict with predicted_str, lower_str, upper_str, confidence_note.
+    The caller is responsible for computing delta vs goal time (needs goal_minutes
+    from the sidebar, which this function does not receive).
+
+    Args:
+        runs_df:   runs_enriched.csv DataFrame with pace_sec_mi, distance_mi,
+                   activity_date columns.
+        weekly_df: Optional weekly_model DataFrame for AES slope and ramp/consistency
+                   lookups. If None, the AES adjustment and some CI factors are skipped.
+        cfg:       Optional config object. Currently unused but accepted for interface
+                   consistency with classify_training_phase / compute_readiness.
+    """
+    _EMPTY = {
+        "predicted_minutes": None,
+        "predicted_str": "—",
+        "lower_str": "—",
+        "upper_str": "—",
+        "confidence_note": "Not enough long runs to project",
+        "delta_vs_goal_str": None,
+        "delta_raw": None,
+    }
+
+    # Step 1: qualifying runs
+    qualifying = (
+        runs_df[runs_df["distance_mi"] >= 8]
+        .dropna(subset=["pace_sec_mi"])
+        .sort_values("activity_date")
+        .tail(5)
+    )
+    n_qual = len(qualifying)
+    if n_qual == 0:
+        return _EMPTY
+
+    # Step 2: distance-weighted average pace
+    weights = qualifying["distance_mi"].values.astype(float)
+    paces   = qualifying["pace_sec_mi"].values.astype(float)
+    weighted_pace    = float(np.average(paces, weights=weights))
+    avg_ref_distance = float(np.average(qualifying["distance_mi"].values, weights=weights))
+
+    # Step 3: Riegel's formula
+    # T2 = weighted_pace × 26.2188 × (26.2188 / avg_ref_distance)^0.06
+    predicted_sec = weighted_pace * 26.2188 * (26.2188 / avg_ref_distance) ** 0.06
+
+    # Step 4: AES efficiency adjustment
+    # AES = pace/HR; a *negative* slope means AES is falling = efficiency improving.
+    aes_adj  = 1.0
+    aes_note = ""
+    if weekly_df is not None and "aes_mean" in weekly_df.columns:
+        recent_aes = (
+            weekly_df.sort_values("week_start")["aes_mean"].dropna().tail(4)
+        )
+        if len(recent_aes) >= 2:
+            slope = float(np.polyfit(range(len(recent_aes)), recent_aes.values, 1)[0])
+            pct   = abs(slope) / float(recent_aes.iloc[0]) if recent_aes.iloc[0] != 0 else 0.0
+            if slope < 0 and pct >= 0.01:   # improving — predict faster
+                aes_adj  = 0.98
+                aes_note = "AES trending up"
+            elif slope > 0 and pct >= 0.01: # declining — predict slower
+                aes_adj  = 1.02
+                aes_note = "AES trending down"
+            else:
+                aes_note = "AES steady"
+
+    predicted_sec     *= aes_adj
+    predicted_minutes  = predicted_sec / 60.0
+
+    # Step 5: confidence interval
+    uncertainty = 3.0  # base ±3 min
+
+    if n_qual < 4:
+        uncertainty += 1.0
+
+    if weekly_df is not None and "aes_mean" in weekly_df.columns:
+        aes_missing_frac = float(weekly_df["aes_mean"].isna().mean())
+        if aes_missing_frac > 0.30:
+            uncertainty += 1.0
+
+    if weekly_df is not None and "ramp_score" in weekly_df.columns:
+        last_ramp = weekly_df.sort_values("week_start")["ramp_score"].dropna()
+        if len(last_ramp) > 0 and float(last_ramp.iloc[-1]) < 30:
+            uncertainty += 1.0
+
+    if weekly_df is not None and "consistency_score" in weekly_df.columns:
+        last_cons = weekly_df.sort_values("week_start")["consistency_score"].dropna()
+        if len(last_cons) > 0 and float(last_cons.iloc[-1]) > 85:
+            uncertainty -= 0.5
+
+    lower_minutes = predicted_minutes - uncertainty
+    upper_minutes = predicted_minutes + uncertainty
+
+    # Confidence note
+    parts = [f"Based on {n_qual} recent run{'s' if n_qual != 1 else ''}"]
+    if aes_note:
+        parts.append(aes_note)
+
+    return {
+        "predicted_minutes": predicted_minutes,
+        "predicted_str":     _fmt_hms(predicted_minutes),
+        "lower_str":         _fmt_hms(lower_minutes),
+        "upper_str":         _fmt_hms(upper_minutes),
+        "confidence_note":   " · ".join(parts),
+        "delta_vs_goal_str": None,   # caller sets this after knowing goal_minutes
+        "delta_raw":         None,
+    }

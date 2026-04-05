@@ -16,3 +16,23 @@ MP_BAND_SEC = 20.0
 # Ramp rate above this is flagged (e.g. week-over-week load increase).
 # Used for weekly "ramp_over_threshold" and notebook logic.
 RAMP_THRESHOLD = 0.15
+
+# Readiness model thresholds
+# Weekly mileage that scores 100 on the volume component.
+TARGET_WEEKLY_MILES = 50
+
+# Long run distance (miles) that scores 100 on the long run component.
+PEAK_LONG_RUN_MI = 20
+
+# Phase classifier thresholds
+# Minimum weekly miles to be considered a Build week.
+BUILD_MIN_MILES = 40
+
+# Fraction of miles at marathon pace for a week to qualify as Peak.
+PEAK_SPECIFICITY = 0.25
+
+# Multiplier: if current miles < (4-week avg × TAPER_FACTOR), label as Taper.
+TAPER_FACTOR = 0.80
+
+# Weeks elapsed before Base can graduate to Build or Peak.
+BUILD_START_WEEKS = 4

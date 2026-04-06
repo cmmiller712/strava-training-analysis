@@ -148,7 +148,7 @@ with st.sidebar:
 
     # ── Athlete profile ──
     st.subheader("👤 Athlete Profile")
-    athlete_name   = st.text_input("Athlete Name", value="Athlete")
+    athlete_name   = st.text_input("Athlete Name", value="Christian Miller")
     goal_race      = st.text_input("Goal Race",    value="Sub-3 Marathon")
     goal_race_date = st.date_input("Goal Race Date", value=None)
     goal_minutes   = float(st.number_input(
@@ -278,8 +278,17 @@ with c1:
 with c2:
     score = safe_float(cur.get("readiness_score"), 0.0)
     delta_score = (score - safe_float(prev.get("readiness_score"), score)) if prev is not None else None
-    delta_str   = f"{delta_score:+.1f} pts vs last week" if delta_score is not None else None
-    st.metric("Readiness Score", f"{score:.0f} / 100", delta=delta_str)
+    if delta_score is not None and abs(delta_score) > 15:
+        st.metric("Readiness Score", f"{score:.0f} / 100")
+        caption_text = (
+            "↑ Large jump — previous week was a rest week"
+            if delta_score > 0
+            else "↓ Large drop — this week has a rest or taper signal"
+        )
+        st.caption(caption_text)
+    else:
+        delta_str = f"{delta_score:+.1f} pts vs last week" if delta_score is not None else None
+        st.metric("Readiness Score", f"{score:.0f} / 100", delta=delta_str)
     color = readiness_color(score)
     label = cur.get("readiness_label", "—")
     st.markdown(f'<span style="color:{color}; font-weight:600">{label}</span>', unsafe_allow_html=True)
@@ -321,34 +330,40 @@ def _first_week(mask_series, date_col="week_start") -> str | None:
     rows = wk[mask_series]
     return rows.iloc[0][date_col].strftime("%b %d") if not rows.empty else None
 
-# M1: First week >= BASE_MAX_MILES
-m1_date = _first_week(wk["miles"] >= cfg.BASE_MAX_MILES)
+# M1: First week >= TARGET_WEEKLY_MILES (build target, not base threshold)
+m1_date = _first_week(wk["miles"] >= cfg.TARGET_WEEKLY_MILES)
 
 # M2: First long run >= PEAK_LONG_RUN_MI
 m2_date = _first_week(wk["long_run_miles"].fillna(0) >= cfg.PEAK_LONG_RUN_MI)
 
-# M3: Three consecutive weeks >= BASE_MAX_MILES
+# M3: Three consecutive weeks >= TARGET_WEEKLY_MILES
 m3_date = None
-above = (wk["miles"] >= cfg.BASE_MAX_MILES).tolist()
+above = (wk["miles"] >= cfg.TARGET_WEEKLY_MILES).tolist()
 for i in range(2, len(above)):
     if above[i] and above[i - 1] and above[i - 2]:
         m3_date = wk.iloc[i]["week_start"].strftime("%b %d")
         break
 
-# M4: First 20-mile long run + trajectory if not yet achieved
+# M4: First 20-mile long run + trajectory if not yet achieved.
+# Uses avg weekly increase over last 4 non-zero long run weeks — avoids
+# the regression-over-all-time bug that produced Oct dates when LR = 18 mi.
 m4_date = _first_week(wk["long_run_miles"].fillna(0) >= 20)
 m4_pending = None
 if not m4_date:
-    lr_valid = wk.dropna(subset=["long_run_miles"])
+    lr_valid = wk[wk["long_run_miles"].fillna(0) > 0].copy()
     cur_lr   = safe_float(lr_valid["long_run_miles"].iloc[-1] if not lr_valid.empty else None, 0.0)
     if len(lr_valid) >= 2:
-        lr_slope = float(np.polyfit(range(len(lr_valid)), lr_valid["long_run_miles"].values, 1)[0])
-        if lr_slope > 0:
-            wks = int(np.ceil((20.0 - cur_lr) / lr_slope))
-            est = (wk.iloc[-1]["week_start"] + pd.Timedelta(weeks=max(1, wks))).strftime("%b %d")
-            m4_pending = f"~{est}"
-        else:
+        recent       = lr_valid["long_run_miles"].tail(4)
+        avg_increase = (recent.iloc[-1] - recent.iloc[0]) / 4
+        if avg_increase <= 0:
             m4_pending = "— add 1–2 mi/week"
+        else:
+            wks = int(np.ceil((20.0 - cur_lr) / avg_increase))
+            if wks > 16:
+                m4_pending = "— resume long run progression"
+            else:
+                est = (pd.Timestamp.today() + pd.Timedelta(weeks=max(1, wks))).strftime("%b %d")
+                m4_pending = f"~{est}"
     else:
         m4_pending = "— building"
 
@@ -370,7 +385,7 @@ m6_date = _first_week(wk["readiness_score"].fillna(0) >= 80)
 
 milestones = [
     {
-        "label": f"First {int(cfg.BASE_MAX_MILES)}-mile week",
+        "label": f"First {int(cfg.TARGET_WEEKLY_MILES)}-mile week",
         "done":  bool(m1_date),
         "value": m1_date or "Not yet",
     },
@@ -380,7 +395,7 @@ milestones = [
         "value": m2_date or "Not yet",
     },
     {
-        "label": f"3× {int(cfg.BASE_MAX_MILES)}+ mi consecutive",
+        "label": f"3× {int(cfg.TARGET_WEEKLY_MILES)}+ mi consecutive",
         "done":  bool(m3_date),
         "value": m3_date or "Not yet",
     },

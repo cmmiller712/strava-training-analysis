@@ -3,6 +3,7 @@ Strava Training Intelligence — Streamlit Dashboard
 """
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -113,12 +114,26 @@ def _load_weekly_base() -> pd.DataFrame:
     return df.drop(columns=[c for c in _RECOMPUTE_COLS if c in df.columns])
 
 
-try:
-    runs_raw    = _load_runs()
-    weekly_base = _load_weekly_base()
-except FileNotFoundError:
-    st.error("⚠️ Run `python src/build_datasets.py` first to generate your training data.")
+weekly_path = Path(_DATA_DIR) / "weekly_model.csv"
+runs_path   = Path(_DATA_DIR) / "runs_enriched.csv"
+
+if not weekly_path.exists() or not runs_path.exists():
+    st.error("⚠️ Training data not found.")
+    st.info("""
+**To run this dashboard with your own data:**
+1. Download your Strava export:
+   Settings → My Account → Download or Delete Your Account
+   → Request Your Archive
+2. Place the unzipped export at `data/raw/strava_export/`
+3. Run: `python src/build_datasets.py`
+4. Relaunch: `streamlit run app.py`
+
+Full setup instructions in the README.
+    """)
     st.stop()
+
+runs_raw    = _load_runs()
+weekly_base = _load_weekly_base()
 
 # One-time HR data quality banner
 if runs_raw["avg_hr"].isna().mean() > 0.5:
@@ -142,11 +157,53 @@ with st.sidebar:
 
     # ── Training thresholds ──
     st.subheader("📊 Training Thresholds")
-    target_miles  = st.slider("Weekly mileage target",   30, 70, int(config.TARGET_WEEKLY_MILES), step=5)
-    base_build    = st.slider("Base → Build (mpw)",      25, 60, int(config.BASE_MAX_MILES),      step=5)
-    peak_lr       = st.slider("Peak long run (mi)",      14, 22, int(config.PEAK_LONG_RUN_MI),    step=1)
-    peak_spec_pct = st.slider("Peak MP specificity (%)", 10, 35, int(config.PEAK_SPECIFICITY * 100), step=5)
-    taper_pct     = st.slider("Taper trigger (% drop)",  60, 85, int(config.TAPER_FACTOR * 100),  step=5)
+
+    preset_names    = list(config.TRAINING_PLAN_PRESETS.keys())
+    selected_preset = st.sidebar.selectbox(
+        "Training Plan Preset",
+        options=["Manual"] + preset_names,
+        index=preset_names.index("Current Plan (40mi / 16mi LR)") + 1,
+        help="Select a preset to auto-fill thresholds, or choose Manual to set your own.",
+    )
+
+    # Auto-fill slider defaults from preset; fall back to config.py constants for Manual.
+    preset_vals = config.TRAINING_PLAN_PRESETS.get(selected_preset, {})
+
+    target_miles  = st.sidebar.slider(
+        "Weekly mileage target",
+        30, 70,
+        value=preset_vals.get("TARGET_WEEKLY_MILES", config.TARGET_WEEKLY_MILES),
+        step=5,
+    )
+    peak_lr = st.sidebar.slider(
+        "Peak long run (mi)",
+        14, 22,
+        value=preset_vals.get("PEAK_LONG_RUN_MI", config.PEAK_LONG_RUN_MI),
+        step=1,
+    )
+    peak_spec_pct = st.sidebar.slider(
+        "Peak MP specificity (%)",
+        10, 35,
+        value=int(preset_vals.get("PEAK_SPECIFICITY", config.PEAK_SPECIFICITY) * 100),
+        step=5,
+    )
+    taper_pct = st.sidebar.slider(
+        "Taper trigger (% of avg)",
+        60, 85,
+        value=int(preset_vals.get("TAPER_FACTOR", config.TAPER_FACTOR) * 100),
+        step=5,
+    )
+    base_build = st.sidebar.slider(
+        "Base → Build threshold (mpw)",
+        25, 60,
+        value=preset_vals.get("BASE_MAX_MILES", config.BASE_MAX_MILES),
+        step=5,
+    )
+
+    st.sidebar.caption(
+        "Thresholds affect readiness scoring and phase classification. "
+        "Changing the preset updates all sliders automatically."
+    )
 
     # SimpleNamespace carries slider values as cfg — passed to pipeline functions
     # so all thresholds update live without touching config.py.
@@ -159,6 +216,8 @@ with st.sidebar:
         TAPER_FACTOR        = taper_pct / 100.0,
         BUILD_START_WEEKS   = config.BUILD_START_WEEKS,
         RAMP_THRESHOLD      = config.RAMP_THRESHOLD,
+        GOAL_MP_SEC         = config.GOAL_MP_SEC,
+        ZONE2_HR_CAP        = config.ZONE2_HR_CAP,
     )
 
     # ── Data info ──

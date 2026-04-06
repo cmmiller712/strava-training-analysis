@@ -19,20 +19,66 @@ RAMP_THRESHOLD = 0.15
 
 # Readiness model thresholds
 # Weekly mileage that scores 100 on the volume component.
-TARGET_WEEKLY_MILES = 50
+TARGET_WEEKLY_MILES = 40
 
 # Long run distance (miles) that scores 100 on the long run component.
-PEAK_LONG_RUN_MI = 20
+PEAK_LONG_RUN_MI = 16
 
 # Phase classifier thresholds
+# Weekly mileage floor to cross from Base into Build.
+BASE_MAX_MILES = 30
+
 # Minimum weekly miles to be considered a Build week.
 BUILD_MIN_MILES = 40
 
 # Fraction of miles at marathon pace for a week to qualify as Peak.
-PEAK_SPECIFICITY = 0.25
+PEAK_SPECIFICITY = 0.20
 
 # Multiplier: if current miles < (4-week avg × TAPER_FACTOR), label as Taper.
-TAPER_FACTOR = 0.80
+TAPER_FACTOR = 0.75
 
 # Weeks elapsed before Base can graduate to Build or Peak.
 BUILD_START_WEEKS = 4
+
+# Heart rate cap for Zone 2 / easy runs (bpm).
+ZONE2_HR_CAP = 150
+
+# Training plan presets — used by Streamlit sidebar dropdown
+# Format: {display_name: {config_key: value}}
+TRAINING_PLAN_PRESETS = {
+    "Custom (Pfitzinger 18/55)": {
+        "TARGET_WEEKLY_MILES": 55,
+        "PEAK_LONG_RUN_MI": 20,
+        "PEAK_SPECIFICITY": 0.20,
+        "TAPER_FACTOR": 0.75,
+        "BASE_MAX_MILES": 40,
+    },
+    "Pfitzinger 18/70": {
+        "TARGET_WEEKLY_MILES": 70,
+        "PEAK_LONG_RUN_MI": 22,
+        "PEAK_SPECIFICITY": 0.20,
+        "TAPER_FACTOR": 0.75,
+        "BASE_MAX_MILES": 45,
+    },
+    "Higdon Intermediate": {
+        "TARGET_WEEKLY_MILES": 40,
+        "PEAK_LONG_RUN_MI": 20,
+        "PEAK_SPECIFICITY": 0.15,
+        "TAPER_FACTOR": 0.80,
+        "BASE_MAX_MILES": 30,
+    },
+    "Hansons Marathon": {
+        "TARGET_WEEKLY_MILES": 60,
+        "PEAK_LONG_RUN_MI": 16,
+        "PEAK_SPECIFICITY": 0.25,
+        "TAPER_FACTOR": 0.70,
+        "BASE_MAX_MILES": 40,
+    },
+    "Current Plan (40mi / 16mi LR)": {
+        "TARGET_WEEKLY_MILES": 40,
+        "PEAK_LONG_RUN_MI": 16,
+        "PEAK_SPECIFICITY": 0.20,
+        "TAPER_FACTOR": 0.75,
+        "BASE_MAX_MILES": 30,
+    },
+}

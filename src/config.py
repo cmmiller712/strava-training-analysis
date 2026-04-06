@@ -43,6 +43,15 @@ BUILD_START_WEEKS = 4
 # Heart rate cap for Zone 2 / easy runs (bpm).
 ZONE2_HR_CAP = 150
 
+# Effort zone pace offsets — relative to GOAL_MP_SEC (seconds/mile)
+# Easy:     pace > GOAL_MP_SEC + EASY_ZONE_OFFSET     (slower than MP + 90s → 8:22+/mi)
+# Moderate: pace > GOAL_MP_SEC + MODERATE_ZONE_OFFSET (7:22–8:22/mi)
+# Marathon: pace >= GOAL_MP_SEC - HARD_ZONE_OFFSET    (6:32–7:22/mi)
+# Hard:     pace < GOAL_MP_SEC - HARD_ZONE_OFFSET     (faster than 6:32/mi)
+EASY_ZONE_OFFSET     = 90
+MODERATE_ZONE_OFFSET = 30
+HARD_ZONE_OFFSET     = 20
+
 # Training plan presets — used by Streamlit sidebar dropdown
 # Format: {display_name: {config_key: value}}
 TRAINING_PLAN_PRESETS = {

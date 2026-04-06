@@ -2,7 +2,10 @@ import os
 import numpy as np
 import pandas as pd
 
-from config import BUILD_START, GOAL_MP_SEC, MP_BAND_SEC, RAMP_THRESHOLD
+from config import (
+    BUILD_START, GOAL_MP_SEC, MP_BAND_SEC, RAMP_THRESHOLD,
+    EASY_ZONE_OFFSET, MODERATE_ZONE_OFFSET, HARD_ZONE_OFFSET,
+)
 from io_strava import load_strava_activities
 
 
@@ -123,6 +126,39 @@ def main():
         "avg_hr": "long_run_avg_hr",
     })
     weekly = weekly.merge(long_runs, on="week_start", how="left")
+
+    # Effort zone classification per run.
+    # Zones are pace-based relative to goal marathon pace so they work even
+    # when HR is absent. Each run is labelled by training intent, not physiology.
+    def _effort_zone(pace: float) -> str:
+        if pd.isna(pace):
+            return "Unknown"
+        if pace > GOAL_MP_SEC + EASY_ZONE_OFFSET:       # > 502 s/mi (8:22+/mi)
+            return "Easy"
+        if pace > GOAL_MP_SEC + MODERATE_ZONE_OFFSET:   # > 442 s/mi (7:22–8:22/mi)
+            return "Moderate"
+        if pace >= GOAL_MP_SEC - HARD_ZONE_OFFSET:      # >= 392 s/mi (6:32–7:22/mi)
+            return "Marathon"
+        return "Hard"                                    # < 392 s/mi (sub-6:32/mi)
+
+    runs["effort_zone"] = runs["pace_sec_mi"].apply(_effort_zone)
+
+    # Weekly zone percentages — fraction of miles in each zone.
+    # Weighted by distance so long runs dominate the zone mix correctly.
+    for zone in ("Easy", "Moderate", "Marathon", "Hard"):
+        zone_col = zone.lower() + "_pct"
+        zone_miles = (
+            runs[runs["effort_zone"] == zone]
+            .groupby("week_start")["distance_mi"]
+            .sum()
+            .rename(zone_col)
+        )
+        weekly = weekly.merge(zone_miles, on="week_start", how="left")
+        weekly[zone_col] = weekly[zone_col].fillna(0.0)
+    # Convert raw zone miles to fraction of weekly total (NaN for rest weeks)
+    for zone in ("easy", "moderate", "marathon", "hard"):
+        col = zone + "_pct"
+        weekly[col] = np.where(weekly["miles"] > 0, weekly[col] / weekly["miles"], np.nan)
 
     # 30-day rolling AES trend at activity level
     runs = runs.sort_values("activity_date")

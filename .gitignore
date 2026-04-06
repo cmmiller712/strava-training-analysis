@@ -8,9 +8,9 @@ Raw Data/
 Raw Data/**
 *.zip
 
-# Processed data (do not commit)
-data/processed/
-data/processed/**
+# Processed data — raw inputs ignored, aggregated outputs allowed
+# runs_enriched.csv and weekly_model.csv are committed for Streamlit Cloud
+data/processed/*.backup.csv
 
 # Python / Jupyter
 .venv/

@@ -1,7 +1,9 @@
+import gzip
 import os
 import glob
 from typing import Optional, Dict, List, Tuple
 
+import pandas as pd
 from fitparse import FitFile
 
 # Constants
@@ -10,14 +12,18 @@ METERS_PER_MILE = 1609.344
 
 def find_fit_files(raw_root: str) -> List[str]:
     """
-    Find all .fit files under the Strava export directory.
-    Strava exports usually contain an 'activities' folder with FIT/GPX/TCX files.
+    Find all .fit and .fit.gz files under the Strava export directory.
+    Kept for backward compatibility; prefer build_fit_index_from_csv when
+    activities.csv is available (Strava bulk exports name FIT files with
+    Garmin internal IDs, not Strava Activity IDs).
     """
     patterns = [
         os.path.join(raw_root, "**", "activities", "*.fit"),
         os.path.join(raw_root, "**", "activities", "*.FIT"),
+        os.path.join(raw_root, "**", "activities", "*.fit.gz"),
         os.path.join(raw_root, "**", "*.fit"),
         os.path.join(raw_root, "**", "*.FIT"),
+        os.path.join(raw_root, "**", "*.fit.gz"),
     ]
     files: List[str] = []
     for pat in patterns:
@@ -26,17 +32,73 @@ def find_fit_files(raw_root: str) -> List[str]:
     return sorted(list(set(files)))
 
 
+def build_fit_index_from_csv(activities_csv_path: str) -> Dict[int, str]:
+    """
+    Build a mapping {strava_activity_id: fit_file_path} using the Filename
+    column in activities.csv.
+
+    Strava bulk exports name FIT files with Garmin internal IDs — completely
+    different numbers from Strava Activity IDs. The Filename column in
+    activities.csv is the only reliable bridge between the two.
+
+    Prefers plain .fit over .fit.gz when both exist (no decompression needed
+    at parse time). Falls back to .fit.gz when only the gzipped file is present.
+
+    Args:
+        activities_csv_path: Absolute or relative path to activities.csv,
+                             e.g. data/raw/strava_export/export_xyz/activities.csv.
+                             FIT file paths in the Filename column are resolved
+                             relative to the directory containing this CSV.
+
+    Returns:
+        Dict mapping int Strava Activity ID → str absolute/relative file path.
+        Only includes rows where the file actually exists on disk.
+    """
+    base_dir = os.path.dirname(activities_csv_path)
+    df = pd.read_csv(activities_csv_path)
+
+    id_col = next((c for c in ["Activity ID", "id"] if c in df.columns), None)
+    fn_col = "Filename" if "Filename" in df.columns else None
+
+    if id_col is None or fn_col is None:
+        return {}
+
+    idx: Dict[int, str] = {}
+    for _, row in df.iterrows():
+        fn = row.get(fn_col)
+        aid_raw = row.get(id_col)
+        if pd.isna(fn) or fn == "" or pd.isna(aid_raw):
+            continue
+        try:
+            aid = int(aid_raw)
+        except (ValueError, TypeError):
+            continue
+
+        full_path = os.path.join(base_dir, str(fn))
+
+        # Prefer plain .fit (no decompression) over .fit.gz when both exist
+        if full_path.endswith(".fit.gz"):
+            plain = full_path[:-3]  # strip .gz
+            if os.path.exists(plain):
+                full_path = plain
+
+        if os.path.exists(full_path):
+            idx[aid] = full_path
+
+    return idx
+
+
 def build_fit_index_by_activity_id(fit_files: List[str]) -> Dict[int, str]:
     """
-    Build a mapping {activity_id: filepath} by extracting any long integer token in the filename.
-    This works when Strava names files with the activity id (common). If export naming changes
-    or you add non-Strava FITs, consider a fallback (e.g. match by date + duration) or a small
-    config mapping activity_id -> path.
+    DEPRECATED — use build_fit_index_from_csv instead.
+
+    Build a mapping {activity_id: filepath} by extracting any long integer
+    token in the filename. Only works when Strava names FIT files with the
+    Strava Activity ID (rare in bulk exports; common in older API exports).
     """
     idx: Dict[int, str] = {}
     for fp in fit_files:
         base = os.path.basename(fp)
-        # Extract all integer tokens from filename
         tokens = []
         cur = ""
         for ch in base:
@@ -48,20 +110,15 @@ def build_fit_index_by_activity_id(fit_files: List[str]) -> Dict[int, str]:
                     cur = ""
         if cur:
             tokens.append(cur)
-
-        # Pick the longest numeric token as the likely activity id
         if not tokens:
             continue
         tok = max(tokens, key=len)
-        # Heuristic: activity ids are usually 8+ digits
         if len(tok) < 8:
             continue
         try:
             aid = int(tok)
         except ValueError:
             continue
-
-        # Keep first occurrence if duplicates
         if aid not in idx:
             idx[aid] = fp
     return idx
@@ -79,8 +136,17 @@ def pace_sec_per_mile_from_speed_mps(speed_mps: float) -> Optional[float]:
 def _iter_fit_records(fit_path: str):
     """
     Yield dicts from FIT 'record' messages.
+
+    Handles both plain .fit and gzip-compressed .fit.gz files.
+    fitparse cannot open .fit.gz by path (invalid header); decompress
+    to bytes first and pass the raw bytes to FitFile instead.
     """
-    fit = FitFile(fit_path)
+    if fit_path.endswith(".gz"):
+        with gzip.open(fit_path, "rb") as fh:
+            raw = fh.read()
+        fit = FitFile(raw)
+    else:
+        fit = FitFile(fit_path)
     for msg in fit.get_messages("record"):
         data = {d.name: d.value for d in msg}
         yield data

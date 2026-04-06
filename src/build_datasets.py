@@ -24,7 +24,8 @@ def to_week_start(dt: pd.Series) -> pd.Series:
 
 def main():
     os.makedirs(PROCESSED_DIR, exist_ok=True)
-    from stream_mp import find_fit_files, build_fit_index_by_activity_id, mp_miles_from_fit
+    from stream_mp import build_fit_index_from_csv, mp_miles_from_fit
+    from io_strava import find_activities_csv
 
     df = load_strava_activities()
 
@@ -52,9 +53,11 @@ def main():
         GOAL_MP_SEC - MP_BAND_SEC, GOAL_MP_SEC + MP_BAND_SEC
     )
 
-    raw_root = os.path.join("data", "raw", "strava_export")
-    fit_files = find_fit_files(raw_root)
-    fit_index = build_fit_index_by_activity_id(fit_files)
+    # Build FIT index from the Filename column in activities.csv.
+    # Strava bulk exports name FIT files with Garmin internal IDs — not Strava
+    # Activity IDs — so the old filename-stem approach produced zero matches.
+    activities_csv = find_activities_csv()
+    fit_index = build_fit_index_from_csv(activities_csv)
 
     def compute_mp_miles_stream(row) -> float:
         aid = row.get("activity_id")

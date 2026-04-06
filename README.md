@@ -111,6 +111,37 @@ heavy training and 3 months during recovery.
 
 ---
 
+## Getting Your Strava Data
+
+This system runs entirely on your own Strava export — no API key
+or third-party access required. To download your data:
+
+1. Log in to Strava on a desktop browser
+2. Go to **Settings → My Account → Download or Delete Your Account**
+3. Click **Request Your Archive**
+4. Strava will email you a ZIP file — this can take a few minutes
+   to a few hours depending on your activity history
+5. Unzip the archive and confirm it contains:
+   - `activities.csv` — your full activity list
+   - `activities/` — a folder of individual `.fit` files
+     (one per activity — these contain second-by-second
+     heart rate, pace, and GPS streams)
+6. Place the unzipped contents at `data/raw/strava_export/`
+   so the path looks like:
+   `data/raw/strava_export/activities.csv`
+   `data/raw/strava_export/activities/`
+
+The pipeline uses both. `activities.csv` powers all volume and
+pace metrics. The `.fit` files power marathon-pace stream
+detection and aerobic efficiency scoring — the more `.fit` files
+present, the more accurate the readiness model becomes.
+
+> **Privacy note:** Your export contains GPS coordinates and
+> personal data. The `data/` directory is git-ignored by default.
+> Never commit your raw export.
+
+---
+
 ## Running It
 ```bash
 # 1. Place your Strava export in data/raw/strava_export/

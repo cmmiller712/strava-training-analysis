@@ -7,6 +7,10 @@ import pandas as pd
 # First date to include in run/build datasets (e.g. start of a training block).
 BUILD_START = pd.to_datetime("2025-12-29")
 
+# Last date to include — set to day before race to produce a clean pre-race snapshot.
+# Race day: April 19, 2026.
+BUILD_END = pd.to_datetime("2026-04-18")
+
 # Goal marathon pace: seconds per mile (sub-3 ≈ 6:52/mi → 412 s/mi).
 GOAL_MP_SEC = 412.0
 

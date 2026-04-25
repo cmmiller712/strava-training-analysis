@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from config import (
-    BUILD_START, GOAL_MP_SEC, MP_BAND_SEC, RAMP_THRESHOLD,
+    BUILD_START, BUILD_END, GOAL_MP_SEC, MP_BAND_SEC, RAMP_THRESHOLD,
     EASY_ZONE_OFFSET, MODERATE_ZONE_OFFSET, HARD_ZONE_OFFSET,
 )
 from io_strava import load_strava_activities
@@ -34,7 +34,10 @@ def main():
 
     # Runs only (handles "Run", "Virtual Run", "Trail Run" etc)
     runs = df[df["activity_type"].str.contains("run", case=False, na=False)].copy()
-    runs = runs[runs["activity_date"] >= BUILD_START].copy()
+    runs = runs[
+        (runs["activity_date"] >= BUILD_START) &
+        (runs["activity_date"] <= BUILD_END)
+    ].copy()
     runs = runs.dropna(subset=["distance_mi", "moving_seconds"])
 
     runs["pace_sec_mi"] = pace_sec_per_mile(runs["distance_mi"], runs["moving_seconds"])

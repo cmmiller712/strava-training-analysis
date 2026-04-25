@@ -39,9 +39,14 @@ def compute_readiness(weekly: pd.DataFrame, cfg=None) -> pd.DataFrame:
       readiness_score   — weighted composite (0–100, 1 decimal)
       readiness_label   — plain-English label
 
+    Fix 4: During Taper weeks, volume and long run scores use peak-block values
+    so the readiness card isn't artificially deflated by intentional cutback.
+
     Args:
         weekly: DataFrame output from build_datasets.py with at minimum:
                 miles, long_run_miles, runs, aes_mean, ramp_rate columns.
+                If a 'phase' column is present (added by classify_training_phase),
+                taper-context scoring is applied automatically.
         cfg:    Optional config object with TARGET_WEEKLY_MILES, PEAK_LONG_RUN_MI,
                 RAMP_THRESHOLD attributes. Defaults to config.py values when None.
                 Pass a types.SimpleNamespace from Streamlit sliders to override
@@ -58,24 +63,43 @@ def compute_readiness(weekly: pd.DataFrame, cfg=None) -> pd.DataFrame:
     weekly = weekly.sort_values("week_start").copy()
 
     # ------------------------------------------------------------------
+    # Fix 4: Taper-adjusted volume and long run scores.
+    # During Taper phase, use the peak 4-week average miles (not current
+    # week) for the volume score, and the peak long run from the entire
+    # block for the long run score. This prevents readiness from collapsing
+    # during the intentional cutback that precedes race day.
+    # ------------------------------------------------------------------
+    has_phase = "phase" in weekly.columns
+
+    # Pre-compute peak values across the entire block
+    peak_4w_avg_miles = weekly["miles"].dropna().rolling(4, min_periods=1).mean().max()
+    peak_long_run_actual = weekly["long_run_miles"].dropna().max() if weekly["long_run_miles"].notna().any() else 0.0
+
+    # ------------------------------------------------------------------
     # Volume score (25%)
     # Fraction of TARGET_WEEKLY_MILES achieved, capped at 100.
-    # A 60 mpw week = 100; a 30 mpw week = 50.
+    # During Taper: use peak 4-week average instead of current week miles.
     # ------------------------------------------------------------------
-    weekly["volume_score"] = weekly["miles"].apply(
-        lambda m: _clamp((m or 0) / target_miles) * 100
-        if pd.notna(m) else 0.0
-    )
+    def _volume_score(row):
+        m = row["miles"]
+        is_taper = has_phase and row.get("phase") == "Taper"
+        effective_miles = peak_4w_avg_miles if (is_taper and pd.notna(peak_4w_avg_miles)) else m
+        return _clamp((effective_miles or 0) / target_miles) * 100 if pd.notna(effective_miles) else 0.0
+
+    weekly["volume_score"] = weekly.apply(_volume_score, axis=1)
 
     # ------------------------------------------------------------------
     # Long run score (25%)
     # Fraction of PEAK_LONG_RUN_THRESHOLD achieved, capped at 100.
-    # An 18-mile long run = 100; a 12-miler = 67.
+    # During Taper: use peak long run from the entire training block.
     # ------------------------------------------------------------------
-    weekly["long_run_score"] = weekly["long_run_miles"].apply(
-        lambda lr: _clamp((lr or 0) / peak_long_run) * 100
-        if pd.notna(lr) else 0.0
-    )
+    def _long_run_score(row):
+        lr = row["long_run_miles"]
+        is_taper = has_phase and row.get("phase") == "Taper"
+        effective_lr = peak_long_run_actual if (is_taper and pd.notna(peak_long_run_actual) and peak_long_run_actual > 0) else lr
+        return _clamp((effective_lr or 0) / peak_long_run) * 100 if pd.notna(effective_lr) else 0.0
+
+    weekly["long_run_score"] = weekly.apply(_long_run_score, axis=1)
 
     # ------------------------------------------------------------------
     # Consistency score (20%)
@@ -179,29 +203,44 @@ def compute_projected_time(
 ) -> dict:
     """
     Estimate marathon finish time using Riegel's endurance formula with
-    an AES-based efficiency adjustment.
+    tier-based qualifying run selection, a dynamic athlete-calibrated exponent,
+    and a taper supercompensation adjustment.
 
     Steps:
-      1. Pull the 5 most recent runs ≥ 8 miles (race-predictive distance).
-      2. Weighted-average pace, weighted by distance (longer runs count more).
-      3. Apply Riegel's formula: T2 = weighted_pace × 26.2188 × (26.2188 / D1)^0.06
-         This is equivalent to the standard T2 = T1 × (D2/D1)^1.06.
-      4. AES adjustment: if aerobic efficiency is improving (aes_mean slope < 0
-         over the last 4 weeks), apply a 2% speed bonus; if declining, 2% penalty.
-         NOTE: AES = pace/HR so a *falling* AES value = *improving* efficiency.
+      1. Select qualifying runs by effort zone tier (Fix 1):
+           Tier 1: effort_zone in ['Marathon', 'Hard'] AND distance_mi >= 8
+           Tier 2: effort_zone == 'Moderate' AND distance_mi >= 8
+           Tier 3: any non-Easy effort_zone AND distance_mi >= 8
+         Runs from the taper window are excluded to prevent easy taper miles
+         from contaminating the pace estimate.
+         Up to 5 runs are selected from the best available tier, with combined
+         pace-and-distance weighting: w = (1/pace_sec_mi) * distance_mi.
+
+      2. Apply Riegel's formula with dynamic exponent (Fix 3):
+           T2 = T1 × (D2/D1)^exponent
+         where exponent starts at 1.06 and is reduced by 0.005 for each
+         of these athlete-quality signals that are met (floor: 1.045):
+           - consistency_score >= 80
+           - aes_trend_score   >= 75
+           - volume_score      >= 75
+
+      3. AES efficiency adjustment (unchanged):
+         ±2% for improving/declining aerobic efficiency over last 4 weeks.
+
+      4. Taper supercompensation (Fix 2):
+         If current_phase == "Taper" and within 3 weeks of last training date,
+         apply a 3% speed bonus (predicted_sec *= 0.97).
+
       5. Confidence interval based on data quality flags.
 
     Returns a dict with predicted_str, lower_str, upper_str, confidence_note.
-    The caller is responsible for computing delta vs goal time (needs goal_minutes
-    from the sidebar, which this function does not receive).
 
     Args:
         runs_df:   runs_enriched.csv DataFrame with pace_sec_mi, distance_mi,
-                   activity_date columns.
-        weekly_df: Optional weekly_model DataFrame for AES slope and ramp/consistency
-                   lookups. If None, the AES adjustment and some CI factors are skipped.
-        cfg:       Optional config object. Currently unused but accepted for interface
-                   consistency with classify_training_phase / compute_readiness.
+                   activity_date, effort_zone columns.
+        weekly_df: Optional weekly_model DataFrame. If phase/score columns are
+                   present, taper detection and dynamic exponent are applied.
+        cfg:       Optional config object (accepted for interface consistency).
     """
     _EMPTY = {
         "predicted_minutes": None,
@@ -213,29 +252,118 @@ def compute_projected_time(
         "delta_raw": None,
     }
 
-    # Step 1: qualifying runs
-    qualifying = (
+    # ------------------------------------------------------------------
+    # Detect current phase and taper window
+    # ------------------------------------------------------------------
+    current_phase = None
+    taper_start_date = None
+
+    if weekly_df is not None and "phase" in weekly_df.columns:
+        wk_sorted = weekly_df.sort_values("week_start")
+        current_phase = wk_sorted["phase"].iloc[-1] if len(wk_sorted) > 0 else None
+
+        # Find earliest taper week to exclude those runs from qualifying pool
+        taper_weeks = wk_sorted[wk_sorted["phase"] == "Taper"]["week_start"]
+        if len(taper_weeks) > 0:
+            taper_start_date = pd.to_datetime(taper_weeks.iloc[0])
+
+    # ------------------------------------------------------------------
+    # Fix 1: Tier-based qualifying run selection
+    # ------------------------------------------------------------------
+    has_effort_zone = "effort_zone" in runs_df.columns
+
+    # Base pool: ≥8 miles, valid pace
+    pool = (
         runs_df[runs_df["distance_mi"] >= 8]
         .dropna(subset=["pace_sec_mi"])
-        .sort_values("activity_date")
-        .tail(5)
+        .copy()
     )
+    pool["activity_date"] = pd.to_datetime(pool["activity_date"], errors="coerce")
+
+    # Exclude taper window runs if we can identify when taper began
+    if taper_start_date is not None:
+        pre_taper = pool[pool["activity_date"] < taper_start_date]
+        # Fall back to full pool only if pre-taper is completely empty
+        pool_to_use = pre_taper if len(pre_taper) > 0 else pool
+    else:
+        pool_to_use = pool
+
+    qualifying = None
+    if has_effort_zone and len(pool_to_use) > 0:
+        # Tier 1: Marathon or Hard efforts
+        t1 = pool_to_use[pool_to_use["effort_zone"].isin(["Marathon", "Hard"])]
+        if len(t1) >= 3:
+            qualifying = t1.sort_values("activity_date").tail(5)
+
+        # Tier 2: Moderate efforts
+        if qualifying is None:
+            t2 = pool_to_use[pool_to_use["effort_zone"] == "Moderate"]
+            if len(t2) >= 2:
+                qualifying = t2.sort_values("activity_date").tail(5)
+
+        # Tier 3: Any non-Easy
+        if qualifying is None:
+            t3 = pool_to_use[pool_to_use["effort_zone"] != "Easy"]
+            if len(t3) > 0:
+                qualifying = t3.sort_values("activity_date").tail(5)
+
+    # Fallback: use full pool (original behavior) if no zone data or no matches
+    if qualifying is None or len(qualifying) == 0:
+        qualifying = pool_to_use.sort_values("activity_date").tail(5)
+        if len(qualifying) == 0:
+            qualifying = pool.sort_values("activity_date").tail(5)
+
     n_qual = len(qualifying)
     if n_qual == 0:
         return _EMPTY
 
-    # Step 2: distance-weighted average pace
-    weights = qualifying["distance_mi"].values.astype(float)
+    # ------------------------------------------------------------------
+    # Fix 1 (cont): Combined pace-and-distance weighting
+    # w = (1/pace_sec_mi) × distance_mi  — faster AND longer runs count most
+    # ------------------------------------------------------------------
     paces   = qualifying["pace_sec_mi"].values.astype(float)
-    weighted_pace    = float(np.average(paces, weights=weights))
-    avg_ref_distance = float(np.average(qualifying["distance_mi"].values, weights=weights))
+    dists   = qualifying["distance_mi"].values.astype(float)
+    weights = (1.0 / paces) * dists
+    weights = weights / weights.sum()   # normalise
 
-    # Step 3: Riegel's formula
-    # T2 = weighted_pace × 26.2188 × (26.2188 / avg_ref_distance)^0.06
-    predicted_sec = weighted_pace * 26.2188 * (26.2188 / avg_ref_distance) ** 0.06
+    weighted_pace        = float(np.dot(paces, weights))
+    avg_ref_distance     = float(np.dot(dists, weights))
 
-    # Step 4: AES efficiency adjustment
-    # AES = pace/HR; a *negative* slope means AES is falling = efficiency improving.
+    # ------------------------------------------------------------------
+    # Fix 3: Dynamic Riegel exponent
+    # Start at 1.06; subtract 0.005 per quality signal met; floor at 1.045.
+    # ------------------------------------------------------------------
+    base_exponent = 1.06
+    exponent = base_exponent
+
+    if weekly_df is not None:
+        wk_sorted_scores = weekly_df.sort_values("week_start")
+        last_week = wk_sorted_scores.iloc[-1] if len(wk_sorted_scores) > 0 else None
+
+        if last_week is not None:
+            cons  = last_week.get("consistency_score", None)
+            aes_t = last_week.get("aes_trend_score", None)
+            vol   = last_week.get("volume_score", None)
+
+            if cons is not None and pd.notna(cons) and float(cons) >= 80:
+                exponent -= 0.005
+            if aes_t is not None and pd.notna(aes_t) and float(aes_t) >= 75:
+                exponent -= 0.005
+            if vol is not None and pd.notna(vol) and float(vol) >= 75:
+                exponent -= 0.005
+
+    exponent = max(exponent, 1.045)
+
+    # Riegel's formula: T2 = T1 × (D2/D1)^exponent
+    # Equivalent form using pace: T2 = weighted_pace × D2 × (D2/D1)^(exponent-1)
+    # = weighted_pace × 26.2188 × (26.2188 / avg_ref_distance)^(exponent - 1)
+    riegel_exp = exponent - 1.0   # the exponent on (D2/D1) in the pace form
+    predicted_sec = weighted_pace * 26.2188 * (26.2188 / avg_ref_distance) ** riegel_exp
+
+    # ------------------------------------------------------------------
+    # AES efficiency adjustment (unchanged)
+    # AES = pace/HR; a *negative* slope means AES is falling = improving.
+    # ------------------------------------------------------------------
     aes_adj  = 1.0
     aes_note = ""
     if weekly_df is not None and "aes_mean" in weekly_df.columns:
@@ -254,10 +382,30 @@ def compute_projected_time(
             else:
                 aes_note = "AES steady"
 
-    predicted_sec     *= aes_adj
+    predicted_sec *= aes_adj
+
+    # ------------------------------------------------------------------
+    # Fix 2: Taper supercompensation
+    # When in Taper phase and within 3 weeks of last training date, apply
+    # a 3% speed bonus to account for rest-induced fitness gains.
+    # ------------------------------------------------------------------
+    taper_bonus_applied = False
+    if current_phase == "Taper" and weekly_df is not None:
+        last_training_date = weekly_df.sort_values("week_start")["week_start"].iloc[-1]
+        last_training_date = pd.to_datetime(last_training_date)
+        # Check if we're within 3 weeks of the end of the training data
+        # (proxy for "close to race day")
+        today = pd.Timestamp.today().normalize()
+        days_to_end = (last_training_date - today).days + 7  # +7 for week duration
+        if days_to_end <= 21:  # within 3 weeks
+            predicted_sec *= 0.97
+            taper_bonus_applied = True
+
     predicted_minutes  = predicted_sec / 60.0
 
-    # Step 5: confidence interval
+    # ------------------------------------------------------------------
+    # Confidence interval
+    # ------------------------------------------------------------------
     uncertainty = 3.0  # base ±3 min
 
     if n_qual < 4:
@@ -282,9 +430,23 @@ def compute_projected_time(
     upper_minutes = predicted_minutes + uncertainty
 
     # Confidence note
-    parts = [f"Based on {n_qual} recent run{'s' if n_qual != 1 else ''}"]
+    tier_label = ""
+    if has_effort_zone and qualifying is not None and len(qualifying) > 0:
+        zones = qualifying["effort_zone"].unique().tolist() if "effort_zone" in qualifying.columns else []
+        if any(z in zones for z in ["Marathon", "Hard"]):
+            tier_label = "quality effort tier"
+        elif "Moderate" in zones:
+            tier_label = "moderate effort tier"
+
+    parts = [f"Based on {n_qual} run{'s' if n_qual != 1 else ''}"]
+    if tier_label:
+        parts.append(tier_label)
     if aes_note:
         parts.append(aes_note)
+    if taper_bonus_applied:
+        parts.append("taper bonus applied")
+    if exponent < base_exponent:
+        parts.append(f"exponent {exponent:.3f}")
 
     return {
         "predicted_minutes": predicted_minutes,
